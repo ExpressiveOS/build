@@ -1425,6 +1425,10 @@ endif
 # when the target-files is signed in a post-build step.
 ifeq ($(DEFAULT_SYSTEM_DEV_CERTIFICATE),build/make/target/product/security/testkey)
 BUILD_KEYS := test-keys
+else ifneq ($(filter vendor/expressiveos-priv/%,$(DEFAULT_SYSTEM_DEV_CERTIFICATE)),)
+BUILD_KEYS := release-keys
+# The old prefix goes in 1.2: through 1.1 a tree whose keys are still
+# under vendor/evolution-priv/ keeps building release-keys.
 else ifneq ($(filter vendor/evolution-priv/%,$(DEFAULT_SYSTEM_DEV_CERTIFICATE)),)
 BUILD_KEYS := release-keys
 else
