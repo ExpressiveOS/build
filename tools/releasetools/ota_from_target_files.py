@@ -22,6 +22,12 @@ Usage:  ota_from_target_files [options] input_target_files output_ota_package
 
 Common options that apply to both of non-A/B and A/B OTAs
 
+  --changelog <file>
+      Include the specified changelog file as changelog.txt at the root of the
+      output OTA package. If not specified, the tool attempts to extract the
+      changelog from META/changelog.txt, PRODUCT/etc/Changelog.txt, or
+      SYSTEM/etc/Changelog.txt in the target-files archive.
+
   --downgrade
       Intentionally generate an incremental OTA that updates from a newer build
       to an older one (e.g. downgrading from P preview back to O MR1).
@@ -318,6 +324,7 @@ logger = logging.getLogger(__name__)
 OPTIONS = ota_utils.OPTIONS
 OPTIONS.verify = False
 OPTIONS.patch_threshold = 0.95
+OPTIONS.changelog = None
 OPTIONS.wipe_user_data = False
 OPTIONS.extra_script = None
 OPTIONS.worker_threads = multiprocessing.cpu_count() // 2
@@ -1191,6 +1198,23 @@ def GenerateAbOtaPackage(target_file, output_file, source_file=None):
     common.ZipWriteStr(output_zip, "apex_info.pb", ota_apex_info,
                        compress_type=zipfile.ZIP_STORED)
 
+  # Add changelog to OTA package if provided via option, or present in target_files
+  changelog_data = None
+  if OPTIONS.changelog and os.path.isfile(OPTIONS.changelog):
+    with open(OPTIONS.changelog, "r", encoding="utf-8", errors="replace") as f:
+      changelog_data = f.read()
+  elif DoesInputFileContain(target_file, "META/changelog.txt"):
+    changelog_data = common.ReadBytesFromInputFile(target_file, "META/changelog.txt")
+  elif DoesInputFileContain(target_file, "PRODUCT/etc/Changelog.txt"):
+    changelog_data = common.ReadBytesFromInputFile(target_file, "PRODUCT/etc/Changelog.txt")
+  elif DoesInputFileContain(target_file, "SYSTEM/etc/Changelog.txt"):
+    changelog_data = common.ReadBytesFromInputFile(target_file, "SYSTEM/etc/Changelog.txt")
+
+  if changelog_data:
+    logger.info("Adding changelog.txt to OTA package")
+    common.ZipWriteStr(output_zip, "changelog.txt", changelog_data,
+                       compress_type=zipfile.ZIP_DEFLATED)
+
   # We haven't written the metadata entry yet, which will be handled in
   # FinalizeMetadata().
   common.ZipClose(output_zip)
@@ -1347,6 +1371,8 @@ def main(argv):
       OPTIONS.enable_replace_zstd = a.lower() != "false"
     elif o == "--disable_replace_compression":
       OPTIONS.disable_replace_compression = True
+    elif o == "--changelog":
+      OPTIONS.changelog = a
     else:
       return False
     return True
@@ -1354,6 +1380,7 @@ def main(argv):
   args = common.ParseOptions(argv, __doc__,
                              extra_opts="b:k:i:d:e:t:2o:",
                              extra_long_opts=[
+                                 "changelog=",
                                  "incremental_from=",
                                  "full_radio",
                                  "full_bootloader",
