@@ -530,6 +530,11 @@ PRODUCT_HOST_PACKAGES += \
     unwind_info \
     unwind_reg_info \
     unwind_symbols \
+
+ifeq ($(EOS_BUILD),)
+PRODUCT_PACKAGES_DEBUG += \
+    su
+endif
     tzdata_host \
     tzdata_host_tzdata_apex \
     tzlookup.xml_host_tzdata_apex \
@@ -606,7 +611,6 @@ PRODUCT_PACKAGES_DEBUG := \
     ss \
     start_with_lockagent \
     strace \
-    su \
     sanitizer-status \
     tracepath \
     tracepath6 \
