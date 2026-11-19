@@ -3667,6 +3667,9 @@ class BlockDifference(object):
                 new_data_name=new_data_name, code=code))
     script.AppendExtra(script.WordWrap(call))
 
+    call = ('delete_recursive("/data/system_ce/0/overlays.xml");')
+    script.AppendExtra(script.WordWrap(call))
+
   def _HashBlocks(self, source, ranges):  # pylint: disable=no-self-use
     data = source.ReadRangeSet(ranges)
     ctx = sha1()
