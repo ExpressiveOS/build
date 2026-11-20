@@ -226,6 +226,10 @@ ifeq (,$(current_product_makefile))
   $(error Cannot locate config makefile for product "$(TARGET_PRODUCT)")
 endif
 
+ifneq (,$(filter eos_%,$(TARGET_PRODUCT)))
+  EOS_BUILD := $(patsubst eos_%,%,$(TARGET_PRODUCT))
+endif
+
 ifneq (,$(filter $(TARGET_PRODUCT),$(products_using_starlark_config)))
   RBC_PRODUCT_CONFIG := true
 endif

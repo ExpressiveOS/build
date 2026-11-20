@@ -452,6 +452,12 @@ function _lunch_meat()
     local release=$2
     local variant=$3
 
+    if [[ "$product" == eos_* ]]; then
+        export EOS_BUILD="${product#eos_}"
+    else
+        export EOS_BUILD=
+    fi
+
     TARGET_PRODUCT=$product \
     TARGET_RELEASE=$release \
     TARGET_BUILD_VARIANT=$variant \
