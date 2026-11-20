@@ -1215,4 +1215,6 @@ if [[ "$USE_LEFTOVERS" -eq 1 ]]; then
   leftovers
 fi
 
-. $ANDROID_BUILD_TOP/vendor/expressiveos/build/envsetup.sh
+if [[ -f "$(gettop)/vendor/expressiveos/build/envsetup.sh" ]]; then
+    . "$(gettop)/vendor/expressiveos/build/envsetup.sh"
+fi
