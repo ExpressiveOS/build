@@ -1056,6 +1056,7 @@ class PartitionBuildProps(object):
         'ro.product.{}.brand', 'ro.product.{}.name', 'ro.product.{}.device']]
     self.build_props = {}
     self.prop_overrides = set()
+    self.from_prebuilt_image = False
     self.placeholder_values = {}
     if placeholder_values:
       self.placeholder_values = copy.deepcopy(placeholder_values)
@@ -1072,13 +1073,15 @@ class PartitionBuildProps(object):
   def FromInputFile(input_file, name, placeholder_values=None, ramdisk_format=RamdiskFormat.LZ4):
     """Loads the build.prop file and builds the attributes."""
 
+    from_prebuilt = False
     if name in ("boot", "init_boot"):
       data = PartitionBuildProps._ReadBootPropFile(
           input_file, name, ramdisk_format=ramdisk_format)
     else:
-      data = PartitionBuildProps._ReadPartitionPropFile(input_file, name)
+      data, from_prebuilt = PartitionBuildProps._ReadPartitionPropFile(input_file, name)
 
     props = PartitionBuildProps(input_file, name, placeholder_values)
+    props.from_prebuilt_image = from_prebuilt
     props._LoadBuildProp(data)
     return props
 
@@ -1101,6 +1104,150 @@ class PartitionBuildProps(object):
       return f.read()
 
   @staticmethod
+  def _FindHostTool(tool_name):
+    for candidate in (
+        os.path.join(OPTIONS.search_path, "bin", tool_name),
+        shutil.which(tool_name),
+    ):
+      if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return None
+
+  @staticmethod
+  def _ReadErofsFile(raw_img, rel_path):
+    dump_erofs = PartitionBuildProps._FindHostTool("dump.erofs")
+    if dump_erofs:
+      proc = subprocess.run(
+          [dump_erofs, "--path=/" + rel_path.lstrip("/"), "-e", raw_img],
+          stdout=subprocess.PIPE,
+          stderr=subprocess.PIPE,
+          text=True,
+          check=False,
+      )
+      if proc.returncode != 0:
+        return None
+      out = proc.stdout
+      size_match = re.search(r"^Size:\s*(\d+)", out, re.MULTILINE)
+      if size_match and "Compression ratio: 100.00%" in out:
+        file_size = int(size_match.group(1))
+        ext_re = re.compile(
+            r"^\s*\d+:\s*(\d+)\.\.\s*(\d+)\s*\|\s*(\d+)\s*:"
+            r"\s*(\d+)\.\.\s*(\d+)\s*\|\s*(\d+)",
+            re.MULTILINE,
+        )
+        extents = ext_re.findall(out)
+        if extents and all(int(llen) == int(plen) for _, _, llen, _, _, plen in extents):
+          buf = bytearray(file_size)
+          with open(raw_img, "rb") as f:
+            for lstart_s, _, llen_s, pstart_s, _, _ in extents:
+              lstart = int(lstart_s)
+              llen = int(llen_s)
+              pstart = int(pstart_s)
+              if lstart >= file_size:
+                continue
+              to_read = min(llen, file_size - lstart)
+              f.seek(pstart)
+              chunk = f.read(to_read)
+              buf[lstart:lstart + len(chunk)] = chunk
+          return buf.decode("utf-8", errors="replace")
+      # File exists in EROFS image but is compressed (or dump.erofs layout
+      # isn't directly readable); signal caller to fall back to fsck.erofs.
+      return False
+    return False
+
+  @staticmethod
+  def _ReadImagePropFile(input_file, name):
+    """Read etc/build.prop or build.prop directly from IMAGES/<name>.img."""
+    image_rel = "IMAGES/{}.img".format(name)
+    tmp_files = []
+    try:
+      if isinstance(input_file, zipfile.ZipFile):
+        if image_rel not in input_file.namelist():
+          return ""
+        img_path = MakeTempFile(prefix=name + "_", suffix=".img")
+        tmp_files.append(img_path)
+        with input_file.open(image_rel, "r") as src_fp, open(img_path, "wb") as dst_fp:
+          shutil.copyfileobj(src_fp, dst_fp, 8 * 1024 * 1024)
+      elif isinstance(input_file, str) and zipfile.is_zipfile(input_file):
+        with zipfile.ZipFile(input_file, "r", allowZip64=True) as zfp:
+          if image_rel not in zfp.namelist():
+            return ""
+          img_path = MakeTempFile(prefix=name + "_", suffix=".img")
+          tmp_files.append(img_path)
+          with zfp.open(image_rel, "r") as src_fp, open(img_path, "wb") as dst_fp:
+            shutil.copyfileobj(src_fp, dst_fp, 8 * 1024 * 1024)
+      elif isinstance(input_file, str) and os.path.isdir(input_file):
+        img_path = os.path.join(input_file, "IMAGES", "{}.img".format(name))
+        if not os.path.isfile(img_path):
+          return ""
+      else:
+        return ""
+
+      with open(img_path, "rb") as f:
+        hdr = f.read(2048)
+      raw_img = img_path
+      if len(hdr) >= 4 and hdr[:4] == b"\x3a\xff\x26\xed":
+        simg2img = PartitionBuildProps._FindHostTool("simg2img")
+        if not simg2img:
+          return ""
+        raw_img = MakeTempFile(prefix=name + "_raw_", suffix=".img")
+        tmp_files.append(raw_img)
+        proc = subprocess.run([simg2img, img_path, raw_img],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              check=False)
+        if proc.returncode != 0:
+          return ""
+        with open(raw_img, "rb") as f:
+          hdr = f.read(2048)
+
+      # EROFS magic (0xe0f5e1e2 LE) at offset 1024
+      if len(hdr) >= 1028 and hdr[1024:1028] == b"\xe2\xe1\xf5\xe0":
+        need_fsck_fallback = False
+        for rel in ("etc/build.prop", "build.prop"):
+          res = PartitionBuildProps._ReadErofsFile(raw_img, rel)
+          if isinstance(res, str) and res:
+            return res
+          if res is False:
+            need_fsck_fallback = True
+        if need_fsck_fallback:
+          fsck_erofs = PartitionBuildProps._FindHostTool("fsck.erofs")
+          if fsck_erofs:
+            extract_dir = MakeTempDir(prefix=name + "_erofs_")
+            try:
+              proc = subprocess.run(
+                  [fsck_erofs, "--extract=" + extract_dir, raw_img],
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+              if proc.returncode == 0:
+                for rel in ("etc/build.prop", "build.prop"):
+                  cand = os.path.join(extract_dir, rel)
+                  if os.path.isfile(cand):
+                    with open(cand, "r", encoding="utf-8", errors="replace") as pf:
+                      return pf.read()
+            finally:
+              shutil.rmtree(extract_dir, ignore_errors=True)
+        return ""
+
+      # ext2/3/4 magic (0xef53 LE) at offset 1080
+      if len(hdr) >= 1082 and hdr[1080:1082] == b"\x53\xef":
+        debugfs = (PartitionBuildProps._FindHostTool("debugfs_static") or
+                   PartitionBuildProps._FindHostTool("debugfs"))
+        if debugfs:
+          for rel in ("etc/build.prop", "build.prop"):
+            proc = subprocess.run(
+                [debugfs, "-R", "cat " + rel, raw_img],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, check=False)
+            if proc.returncode == 0 and proc.stdout:
+              return proc.stdout
+      return ""
+    finally:
+      for tf in tmp_files:
+        try:
+          os.unlink(tf)
+        except OSError:
+          pass
+
+  @staticmethod
   def _ReadPartitionPropFile(input_file, name):
     """
     Read build.prop for name from input_file.
@@ -1110,9 +1257,13 @@ class PartitionBuildProps(object):
     partition_map = PartitionMapFromTargetFiles(input_file)
     if name not in partition_map:
       # Prebuilt partitions (BOARD_PREBUILT_VENDORIMAGE etc.) ship only
-      # IMAGES/<name>.img, without an extracted directory.
-      logger.warning("No directory for partition %s; skipping build.prop", name)
-      return data
+      # IMAGES/<name>.img, without an extracted directory. Fall back to
+      # reading etc/build.prop or build.prop directly from the image.
+      data = PartitionBuildProps._ReadImagePropFile(input_file, name)
+      if not data:
+        logger.warning("No directory for partition %s; skipping build.prop", name)
+        return '', False
+      return data, True
     for prop_file in ['{}/etc/build.prop'.format(partition_map[name]),
                       '{}/build.prop'.format(partition_map[name])]:
       try:
@@ -1122,7 +1273,7 @@ class PartitionBuildProps(object):
         logger.warning('Failed to read %s', prop_file)
     if data == '':
       logger.warning("Failed to read build.prop for partition {}".format(name))
-    return data
+    return data, False
 
   @staticmethod
   def FromBuildPropFile(name, build_prop_file):
