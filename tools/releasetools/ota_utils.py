@@ -213,8 +213,11 @@ def UpdateDeviceState(device_state, build_info, boot_variable_values,
     for partition in sorted(set(PARTITIONS_WITH_BUILD_PROP) & ab_partitions):
       partition_prop = build_info.info_dict.get(
           '{}.build.prop'.format(partition))
-      # Skip if the partition is missing, or it doesn't have a build.prop
-      if not partition_prop or not partition_prop.build_props:
+      # Skip if the partition is missing, doesn't have a build.prop, or was
+      # loaded from a prebuilt image (whose stock build timestamp predates
+      # the ROM build and must not constrain per-partition timestamps).
+      if (not partition_prop or not partition_prop.build_props or
+          getattr(partition_prop, 'from_prebuilt_image', False)):
         continue
 
       partition_state = partition_states.add()
